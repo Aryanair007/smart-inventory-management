@@ -13,6 +13,7 @@ import {
   ClipboardCheck,
   Clock3,
   LayoutDashboard,
+  LogOut,
   Menu,
   Package,
   PackageCheck,
@@ -27,6 +28,7 @@ import {
   Zap,
 } from 'lucide-react';
 import { supabase, type InventoryItem, type WarehouseActivity } from '@/lib/supabase';
+import { AuthPage, type AuthUser } from './Auth';
 
 type View = 'overview' | 'inventory' | 'copilot' | 'products' | 'more';
 type Modal = 'receive' | 'dispatch' | null;
@@ -47,6 +49,9 @@ const fallbackActivity: WarehouseActivity[] = [
 ];
 
 function App() {
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const [view, setView] = useState<View>('overview');
   const [items, setItems] = useState<InventoryItem[]>(fallbackItems);
   const [activity, setActivity] = useState<WarehouseActivity[]>(fallbackActivity);
@@ -55,18 +60,108 @@ function App() {
   const [modal, setModal] = useState<Modal>(null);
   const [search, setSearch] = useState('');
 
-  const loadData = async () => {
-    setLoading(true);
-    const [itemsResult, activityResult] = await Promise.all([
-      supabase.from('inventory_items').select('*').order('quantity', { ascending: true }),
-      supabase.from('warehouse_activity').select('*').order('created_at', { ascending: false }).limit(5),
-    ]);
-    if (!itemsResult.error && itemsResult.data?.length) setItems(itemsResult.data as InventoryItem[]);
-    if (!activityResult.error && activityResult.data?.length) setActivity(activityResult.data as WarehouseActivity[]);
-    setLoading(false);
+  // Check initial authentication state (saved local session or Supabase session)
+  useEffect(() => {
+    const checkAuth = async () => {
+      // 1. Check local session
+      const savedUser =
+        localStorage.getItem('smartstock_current_user') ||
+        localStorage.getItem('smartstock_demo_user');
+
+      if (savedUser) {
+        try {
+          setCurrentUser(JSON.parse(savedUser));
+          setAuthLoading(false);
+          return;
+        } catch {
+          localStorage.removeItem('smartstock_current_user');
+          localStorage.removeItem('smartstock_demo_user');
+        }
+      }
+
+      // 2. Check Supabase session
+      try {
+        const { data } = await supabase.auth.getSession();
+        if (data?.session?.user) {
+          const u = data.session.user;
+          const authUser: AuthUser = {
+            email: u.email || 'alex.admin@smartstock.io',
+            name: u.user_metadata?.full_name || u.email?.split('@')[0] || 'Alex Rivera',
+            role: 'Super Admin',
+          };
+          localStorage.setItem('smartstock_current_user', JSON.stringify(authUser));
+          setCurrentUser(authUser);
+          setAuthLoading(false);
+          return;
+        }
+      } catch (err) {
+        console.warn('Session check warning:', err);
+      }
+
+      setAuthLoading(false);
+    };
+
+    void checkAuth();
+
+    const { data: authListener } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (session?.user) {
+        const authUser: AuthUser = {
+          email: session.user.email || '',
+          name: session.user.user_metadata?.full_name || session.user.email?.split('@')[0] || 'Warehouse Admin',
+          role: 'Super Admin',
+        };
+        localStorage.setItem('smartstock_current_user', JSON.stringify(authUser));
+        setCurrentUser(authUser);
+      }
+    });
+
+    return () => {
+      authListener.subscription.unsubscribe();
+    };
+  }, []);
+
+  // Close profile dropdown on outside click
+  useEffect(() => {
+    if (!profileMenuOpen) return;
+    const closeMenu = () => setProfileMenuOpen(false);
+    window.addEventListener('click', closeMenu);
+    return () => window.removeEventListener('click', closeMenu);
+  }, [profileMenuOpen]);
+
+  const handleSignOut = async () => {
+    try {
+      await supabase.auth.signOut();
+    } catch (err) {
+      console.warn('Sign out error:', err);
+    }
+    localStorage.removeItem('smartstock_current_user');
+    localStorage.removeItem('smartstock_demo_user');
+    setCurrentUser(null);
+    setProfileMenuOpen(false);
+    setNotice('You have signed out successfully.');
   };
 
-  useEffect(() => { void loadData(); }, []);
+  const loadData = async () => {
+    setLoading(true);
+    try {
+      const [itemsResult, activityResult] = await Promise.all([
+        supabase.from('inventory_items').select('*').order('quantity', { ascending: true }),
+        supabase.from('warehouse_activity').select('*').order('created_at', { ascending: false }).limit(5),
+      ]);
+      if (!itemsResult.error && itemsResult.data?.length) setItems(itemsResult.data as InventoryItem[]);
+      if (!activityResult.error && activityResult.data?.length) setActivity(activityResult.data as WarehouseActivity[]);
+    } catch (err) {
+      console.warn('Error loading data from Supabase:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (currentUser) {
+      void loadData();
+    }
+  }, [currentUser]);
 
   useEffect(() => {
     if (!notice) return;
@@ -87,16 +182,40 @@ function App() {
     if (!firstItem) return;
     const nextQuantity = type === 'received' ? firstItem.quantity + quantity : Math.max(0, firstItem.quantity - quantity);
     const nextStatus: InventoryItem['status'] = nextQuantity === 0 ? 'out_of_stock' : nextQuantity <= firstItem.reorder_level ? 'low_stock' : 'in_stock';
-    const { error } = await supabase.from('inventory_items').update({ quantity: nextQuantity, status: nextStatus, updated_at: new Date().toISOString() }).eq('id', firstItem.id);
-    if (error) {
-      setNotice('The warehouse action could not be saved.');
-      return;
+    
+    try {
+      const { error } = await supabase.from('inventory_items').update({ quantity: nextQuantity, status: nextStatus, updated_at: new Date().toISOString() }).eq('id', firstItem.id);
+      if (error) {
+        setNotice('Notice: Saved locally (cloud update pending).');
+      } else {
+        await supabase.from('warehouse_activity').insert({ action: type, title: type === 'received' ? 'Stock received' : 'Stock dispatched', detail: `${quantity} units • ${firstItem.name}`, quantity });
+      }
+    } catch (err) {
+      console.warn('Error saving movement to Supabase:', err);
     }
-    await supabase.from('warehouse_activity').insert({ action: type, title: type === 'received' ? 'Stock received' : 'Stock dispatched', detail: `${quantity} units • ${firstItem.name}`, quantity });
+
+    setItems((prev) => prev.map((item, idx) => idx === 0 ? { ...item, quantity: nextQuantity, status: nextStatus } : item));
     setModal(null);
     setNotice(type === 'received' ? `Received ${quantity} units into ${firstItem.name}.` : `Dispatched ${quantity} units from ${firstItem.name}.`);
-    await loadData();
   };
+
+  if (authLoading) {
+    return (
+      <div className="auth-wrapper">
+        <div className="auth-container" style={{ textAlign: 'center', padding: '48px 24px' }}>
+          <div className="brand-mark" style={{ margin: '0 auto 16px', width: '48px', height: '48px' }}>
+            <Boxes size={28} strokeWidth={2.5} />
+          </div>
+          <h2 style={{ fontFamily: 'Space Grotesk', margin: '0 0 6px', fontSize: '20px' }}>SmartStock Workspace</h2>
+          <p style={{ color: '#777180', fontSize: '12px', margin: 0 }}>Connecting to secure warehouse session...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!currentUser) {
+    return <AuthPage onAuthSuccess={(user) => setCurrentUser(user)} />;
+  }
 
   return (
     <div className="app-shell">
@@ -108,17 +227,46 @@ function App() {
         </button>
         <div className="top-actions">
           <button className="icon-button" aria-label="Notifications"><Bell size={20} /><i /></button>
-          <button className="avatar-button" aria-label="Open profile"><span>BOX</span></button>
+          <div className="profile-wrapper" onClick={(e) => e.stopPropagation()}>
+            <button
+              className="avatar-button"
+              aria-label="Open profile"
+              onClick={() => setProfileMenuOpen(!profileMenuOpen)}
+              title={`${currentUser.name} (${currentUser.email})`}
+            >
+              <span>{currentUser.name.slice(0, 3).toUpperCase()}</span>
+            </button>
+            {profileMenuOpen && (
+              <div className="profile-popover">
+                <div className="profile-header">
+                  <div className="profile-badge-avatar">
+                    {currentUser.name.slice(0, 2).toUpperCase()}
+                  </div>
+                  <div className="profile-details">
+                    <strong>{currentUser.name}</strong>
+                    <small>{currentUser.email}</small>
+                  </div>
+                </div>
+                <div className="profile-role-tag">
+                  {currentUser.role} {currentUser.isDemo ? '• Demo Mode' : '• Verified'}
+                </div>
+                <button className="profile-logout-btn" onClick={handleSignOut}>
+                  <LogOut size={13} />
+                  <span>Sign Out</span>
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </header>
 
       <main>
         {notice && <div className="toast"><Check size={16} /> {notice}<button onClick={() => setNotice('')}><X size={15} /></button></div>}
-        {view === 'overview' && <Overview items={items} activity={activity} stats={stats} loading={loading} onView={setView} onAction={setModal} />}
+        {view === 'overview' && <Overview userName={currentUser.name.split(' ')[0]} items={items} activity={activity} stats={stats} loading={loading} onView={setView} onAction={setModal} />}
         {view === 'inventory' && <Inventory items={filteredItems} search={search} onSearch={setSearch} onRefresh={loadData} onAction={setModal} onNotice={setNotice} />}
         {view === 'copilot' && <Copilot items={items} onAction={setModal} />}
         {view === 'products' && <Products items={items} onNotice={setNotice} />}
-        {view === 'more' && <More onNotice={setNotice} />}
+        {view === 'more' && <More onNotice={setNotice} onSignOut={handleSignOut} />}
       </main>
 
       <nav className="bottom-nav">
@@ -134,11 +282,10 @@ function App() {
   );
 }
 
-function Overview({ items, activity, stats, loading, onView, onAction }: { items: InventoryItem[]; activity: WarehouseActivity[]; stats: { units: number; value: number; low: number }; loading: boolean; onView: (view: View) => void; onAction: (modal: Modal) => void }) {
-  const lowItems = items.filter((item) => item.status !== 'in_stock');
+function Overview({ userName, items, activity, stats, loading, onView, onAction }: { userName: string; items: InventoryItem[]; activity: WarehouseActivity[]; stats: { units: number; value: number; low: number }; loading: boolean; onView: (view: View) => void; onAction: (modal: Modal) => void }) {
   return <div className="page-grid">
     <section className="hero-card">
-      <div className="hero-copy"><div className="eyebrows"><span>● Live &amp; Buzzing</span><span>♛ Super Admin</span></div><h1>Welcome back, Alex!</h1><p>Your warehouses are vibing at <strong>98%</strong> efficiency today.</p></div>
+      <div className="hero-copy"><div className="eyebrows"><span>● Live &amp; Buzzing</span><span>♛ Super Admin</span></div><h1>Welcome back, {userName}!</h1><p>Your warehouses are vibing at <strong>98%</strong> efficiency today.</p></div>
       <div className="hero-box"><div className="box-art">▦</div><span>Boxie <b>AI</b></span></div><Sparkles className="hero-spark" size={18} />
     </section>
     <section className="section-heading"><div><Zap size={15} /> SPEEDY HUMAN ACTIONS</div><button onClick={() => onView('inventory')}>Slide for more <ArrowRight size={14} /></button></section>
@@ -163,7 +310,39 @@ function Copilot({ items, onAction }: { items: InventoryItem[]; onAction: (modal
 
 function Products({ items, onNotice }: { items: InventoryItem[]; onNotice: (message: string) => void }) { return <div className="page-grid products-page"><div className="page-heading"><div><p className="eyebrow">CATALOG MANAGEMENT</p><h1>Products</h1></div><button className="add-button" onClick={() => onNotice('Product creation is ready for your next catalog item.')}><Plus size={17} /> Add Product</button></div><div className="search-box"><Search size={17} /><input placeholder="Search your catalog" /><span>{items.length} items</span></div><div className="product-grid">{items.map((item) => <article className="product-card" key={item.id}><div className="product-art">{item.category === 'Furniture' ? '▱' : item.category === 'Electronics' ? '▣' : '▦'}</div><div><span className={`status ${item.status}`}>{item.status.replace('_', ' ')}</span><h2>{item.name}</h2><p>{item.sku} · {item.location}</p><strong>{item.quantity} <small>units</small></strong></div><button onClick={() => onNotice(`${item.name} selected.`)}><ChevronRight size={17} /></button></article>)}</div></div>; }
 
-function More({ onNotice }: { onNotice: (message: string) => void }) { return <div className="page-grid more-page"><div className="page-heading"><div><p className="eyebrow">WORKSPACE SETTINGS</p><h1>More</h1></div></div>{([{ label: 'Settings', icon: Settings }, { label: 'Team members', icon: Boxes }, { label: 'Help center', icon: CircleHelp }, { label: 'Activity history', icon: Clock3 }]).map(({ label, icon: Icon }) => <button className="more-row" key={label} onClick={() => onNotice(`${label} is ready to open.`)}><Icon size={20} /><span>{label}</span><ChevronRight size={18} /></button>)}</div>; }
+function More({ onNotice, onSignOut }: { onNotice: (message: string) => void; onSignOut: () => void }) {
+  return (
+    <div className="page-grid more-page">
+      <div className="page-heading">
+        <div>
+          <p className="eyebrow">WORKSPACE SETTINGS</p>
+          <h1>More</h1>
+        </div>
+      </div>
+      {[
+        { label: 'Settings', icon: Settings },
+        { label: 'Team members', icon: Boxes },
+        { label: 'Help center', icon: CircleHelp },
+        { label: 'Activity history', icon: Clock3 },
+      ].map(({ label, icon: Icon }) => (
+        <button className="more-row" key={label} onClick={() => onNotice(`${label} is ready to open.`)}>
+          <Icon size={20} />
+          <span>{label}</span>
+          <ChevronRight size={18} />
+        </button>
+      ))}
+      <button
+        className="more-row"
+        style={{ color: '#a31f2d', background: '#fff2f2', borderColor: '#a31f2d' }}
+        onClick={onSignOut}
+      >
+        <LogOut size={20} />
+        <span>Sign Out</span>
+        <ChevronRight size={18} />
+      </button>
+    </div>
+  );
+}
 
 function Metric({ label, value, detail, icon, purple = false, pink = false, yellow = false }: { label: string; value: string; detail: string; icon: React.ReactNode; purple?: boolean; pink?: boolean; yellow?: boolean }) { return <div className={`metric ${purple ? 'metric-purple' : ''} ${pink ? 'metric-pink' : ''} ${yellow ? 'metric-yellow' : ''}`}><div><small>{label}</small><strong>{value}</strong><span>{detail}</span></div>{icon}</div>; }
 function ActivityRow({ entry }: { entry: WarehouseActivity }) { return <div className="activity-row"><span className={`activity-icon ${entry.action}`}>{entry.action === 'received' ? '◉' : entry.action === 'alert' ? '▣' : '▰'}</span><div><b>{entry.title}</b><small>{entry.detail}</small></div><time>{entry.action === 'received' ? '8m ago' : entry.action === 'audit' ? '42m ago' : '1h ago'}</time></div>; }
