@@ -6,6 +6,7 @@ import {
   ArrowUpFromLine,
   BarChart3,
   Bell,
+  Bot,
   Boxes,
   Check,
   ChevronRight,
@@ -29,6 +30,7 @@ import {
 } from 'lucide-react';
 import { supabase, type InventoryItem, type WarehouseActivity } from '@/lib/supabase';
 import { AuthPage, type AuthUser } from './Auth';
+import { Chatbot } from './Chatbot';
 
 type View = 'overview' | 'inventory' | 'copilot' | 'products' | 'more';
 type Modal = 'receive' | 'dispatch' | null;
@@ -199,6 +201,50 @@ function App() {
     setNotice(type === 'received' ? `Received ${quantity} units into ${firstItem.name}.` : `Dispatched ${quantity} units from ${firstItem.name}.`);
   };
 
+  const handleQuickMovement = async (item: InventoryItem, type: 'received' | 'dispatched', quantity: number) => {
+    const nextQuantity = type === 'received' ? item.quantity + quantity : Math.max(0, item.quantity - quantity);
+    const nextStatus: InventoryItem['status'] =
+      nextQuantity === 0 ? 'out_of_stock' : nextQuantity <= item.reorder_level ? 'low_stock' : 'in_stock';
+
+    try {
+      const { error } = await supabase
+        .from('inventory_items')
+        .update({ quantity: nextQuantity, status: nextStatus, updated_at: new Date().toISOString() })
+        .eq('id', item.id);
+
+      if (!error) {
+        await supabase.from('warehouse_activity').insert({
+          action: type,
+          title: type === 'received' ? 'Stock received via Pip AI' : 'Stock dispatched via Pip AI',
+          detail: `${quantity} units • ${item.name}`,
+          quantity,
+        });
+      }
+    } catch (err) {
+      console.warn('Error saving movement to Supabase:', err);
+    }
+
+    setItems((prev) =>
+      prev.map((i) => (i.id === item.id ? { ...i, quantity: nextQuantity, status: nextStatus } : i))
+    );
+    setActivity((prev) => [
+      {
+        id: String(Date.now()),
+        action: type,
+        title: type === 'received' ? 'Stock received via Pip AI' : 'Stock dispatched via Pip AI',
+        detail: `${quantity} units • ${item.name}`,
+        quantity,
+        created_at: new Date().toISOString(),
+      },
+      ...prev.slice(0, 4),
+    ]);
+    setNotice(
+      type === 'received'
+        ? `Pip restocked +${quantity} units into ${item.name}.`
+        : `Pip dispatched ${quantity} units from ${item.name}.`
+    );
+  };
+
   if (authLoading) {
     return (
       <div className="auth-wrapper">
@@ -264,7 +310,7 @@ function App() {
         {notice && <div className="toast"><Check size={16} /> {notice}<button onClick={() => setNotice('')}><X size={15} /></button></div>}
         {view === 'overview' && <Overview userName={currentUser.name.split(' ')[0]} items={items} activity={activity} stats={stats} loading={loading} onView={setView} onAction={setModal} />}
         {view === 'inventory' && <Inventory items={filteredItems} search={search} onSearch={setSearch} onRefresh={loadData} onAction={setModal} onNotice={setNotice} />}
-        {view === 'copilot' && <Copilot items={items} onAction={setModal} />}
+        {view === 'copilot' && <Copilot items={items} activity={activity} onAction={setModal} onQuickMovement={handleQuickMovement} onNavigateTab={setView} />}
         {view === 'products' && <Products items={items} onNotice={setNotice} />}
         {view === 'more' && <More onNotice={setNotice} onSignOut={handleSignOut} />}
       </main>
@@ -303,9 +349,19 @@ function Inventory({ items, search, onSearch, onRefresh, onAction, onNotice }: {
   return <div className="page-grid inventory-page"><div className="page-heading"><div><p className="eyebrow">LIVE TELEMETRY <span>●</span></p><h1>Inventory Hub <Sparkles size={19} /></h1></div><button className="refresh" onClick={() => void onRefresh()}><RefreshCw size={16} /> Refresh</button></div><section className="capacity-card"><div><small>BAY 1-4 TOTAL CAPACITY</small><strong>42,850 <em>Units</em></strong><p>Storage Occupancy <b>92%</b></p><div className="capacity-bar"><span /></div></div><div className="package-illustration">▰</div></section><section className="in-out"><div><small>STOCK IN</small><strong>+680</strong><span>Units received</span><b>◆ 8 manifests</b></div><div><small>STOCK OUT</small><strong>-420</strong><span>Units dispatched</span><b>◆ 19 outbound vans</b></div></section><section><div className="quick-heading"><h2>Quick Operations</h2><span>STAMP &amp; GO ✦</span></div><div className="operation-list"><button className="operation yellow" onClick={() => onAction('receive')}><ArrowDownToLine /><span><b>Stock In</b><small>Receive Cargo &amp; Scan Bins</small></span><ArrowRight /></button><button className="operation purple" onClick={() => onAction('dispatch')}><Truck /><span><b>Stock Out</b><small>Dispatch Order Manifest</small></span><ArrowRight /></button><button className="operation white" onClick={() => onNotice('Audit mode is ready for your next barcode cycle.')}><ClipboardCheck /><span><b>Stock Audit &amp; Adjustment</b><small>Barcode cycle count</small></span><ArrowRight /></button></div></section><div className="filter-pills"><button>All Stacks ({items.length})</button><button>Low Stock ({items.filter((item) => item.status !== 'in_stock').length}) ⚠</button><button>Empty Rack</button></div><section><div className="section-title"><h2>Urgent Items <i className="red-dot" /></h2><span className="urgent-count">3 Actionable</span></div><div className="urgent-list">{items.filter((item) => item.status !== 'in_stock').map((item) => <UrgentItem key={item.id} item={item} onNotice={onNotice} />)}</div></section><section className="bounce-card"><div className="section-title"><h2>↔ Recent Bounces</h2><span className="realtime">Realtime</span></div>{['+120 Ultra-Wide Monitors', '-45 Wireless Headsets', '-18 Ergonomic Mats'].map((text, index) => <div className="bounce-row" key={text}><span className={`bounce-icon b${index}`}>{index === 0 ? '+' : '−'}</span><div><b>{text}</b><small>{['Bin A-14 • Received by Alex V.', 'Dock 3 Dispatch • Elena K.', 'Bin C-02 • Marcus T.'][index]}</small></div><time>{['Just now', '14m ago', '42m ago'][index]}</time></div>)}</section></div>;
 }
 
-function Copilot({ items, onAction }: { items: InventoryItem[]; onAction: (modal: Modal) => void }) {
-  const low = items.filter((item) => item.status !== 'in_stock');
-  return <div className="page-grid copilot-page"><div className="page-heading"><div><p className="eyebrow">SMART ASSISTANT</p><h1>Copilot <Sparkles size={19} /></h1></div><div className="copilot-orb">✦</div></div><section className="pip-card"><div className="pip-avatar">◉</div><div><div className="pip-title">Pip AI <span>ACTIVE</span></div><p>Beep boop! I'm Pip, your smart inventory pal. Let's make sure zero boxes get left behind!</p></div></section><div className="risk-banner"><AlertTriangle size={20} /><span><b>{low.length} HIGH-RISK SKUs</b><small>Running dry in 4–6 days</small></span><strong>$3,420 saved</strong></div><section className="chat-card"><div className="chat-meta">◉ Pip &nbsp; 10:42 AM</div><div className="chat-bubble">Hi Alex! 👋 I crunched the numbers across <b>{items.reduce((sum, item) => sum + item.quantity, 0).toLocaleString()} SKUs</b>. Here's your hot restock recommendation:</div><div className="recommendation"><h2>Thunderbolt 4 Pro Dock <span>Low Stock</span></h2><small>TB4-DOCK-BLK • Aisle 4B</small><div className="rec-stats"><b>2.4x <small>/ day velocity</small></b><b>Thu 2:00 PM <small>depletes</small></b></div><div className="plan"><b>♧ Smart Restock Plan</b><p>Order <strong>150 units</strong> from Apex Tech. Consolidation with Route #4 saves $410.</p></div><button onClick={() => onAction('receive')}>◎ Approve PO &amp; Send to Vendor</button><button className="adjust">≡ Adjust Qty</button></div></section><div className="copilot-question">Which products are slow-moving and hogging warehouse space? <span>😴</span></div><section className="slow-card"><div className="chat-meta">◉ Pip &nbsp; 10:45 AM</div><p>Found <b>4 sleepy products</b> with 0 sales for 60+ days!</p>{['Leather Executive Chairs', 'Vintage Desk Lamps'].map((name, index) => <div className="slow-row" key={name}><span>{index === 0 ? '▱' : '⌂'}</span><b>{name}</b><strong>{index === 0 ? '$12,400' : '$2,160'}</strong></div>)}<div className="bright-idea"><b>✧ Pip's Bright Idea</b><p>Run a 15% Flash Clearance Promo or bundle the lamps with high-velocity mechanical keyboards.</p></div><button onClick={() => onAction('dispatch')}>⌑ Draft 15% Clearance Promo</button></section><div className="suggested"><p>♧ SUGGESTED QUICK ACTIONS</p><button onClick={() => onAction('receive')}>◉ Predict Next Week's Stockouts</button><button onClick={() => onAction('dispatch')}>▰ Reorder Low Stock</button></div></div>;
+function Copilot({ items, activity, onAction, onQuickMovement, onNavigateTab }: { items: InventoryItem[]; activity: WarehouseActivity[]; onAction: (modal: Modal) => void; onQuickMovement: (item: InventoryItem, type: 'received' | 'dispatched', qty: number) => Promise<void>; onNavigateTab: (view: View) => void }) {
+  return (
+    <div className="page-grid copilot-page">
+      <div className="page-heading">
+        <div>
+          <p className="eyebrow">SMART ASSISTANT</p>
+          <h1>Pip &amp; Boxie AI <Sparkles size={19} /></h1>
+        </div>
+        <div className="copilot-orb">✦</div>
+      </div>
+      <Chatbot items={items} activity={activity} onAction={onAction} onQuickMovement={onQuickMovement} onNavigateTab={onNavigateTab} />
+    </div>
+  );
 }
 
 function Products({ items, onNotice }: { items: InventoryItem[]; onNotice: (message: string) => void }) { return <div className="page-grid products-page"><div className="page-heading"><div><p className="eyebrow">CATALOG MANAGEMENT</p><h1>Products</h1></div><button className="add-button" onClick={() => onNotice('Product creation is ready for your next catalog item.')}><Plus size={17} /> Add Product</button></div><div className="search-box"><Search size={17} /><input placeholder="Search your catalog" /><span>{items.length} items</span></div><div className="product-grid">{items.map((item) => <article className="product-card" key={item.id}><div className="product-art">{item.category === 'Furniture' ? '▱' : item.category === 'Electronics' ? '▣' : '▦'}</div><div><span className={`status ${item.status}`}>{item.status.replace('_', ' ')}</span><h2>{item.name}</h2><p>{item.sku} · {item.location}</p><strong>{item.quantity} <small>units</small></strong></div><button onClick={() => onNotice(`${item.name} selected.`)}><ChevronRight size={17} /></button></article>)}</div></div>; }
