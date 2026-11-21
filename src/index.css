@@ -544,6 +544,38 @@ main { padding: 14px 22px 30px; }.page-grid { display: grid; gap: 14px; }.hero-c
   text-overflow: ellipsis;
 }
 
+.chatbot-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.key-status-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 10px;
+  border: 1.5px solid #18171e;
+  border-radius: 10px;
+  background: #f1edff;
+  color: #4b3094;
+  font: 700 11px 'Space Grotesk';
+  cursor: pointer;
+  box-shadow: 2px 2px 0 #18171e;
+  transition: all 0.1s ease;
+}
+
+.key-status-btn:hover {
+  transform: translate(-1px, -1px);
+  background: #e2d5ff;
+}
+
+.key-status-btn.active {
+  background: #d4f7dc;
+  color: #12632b;
+  border-color: #18171e;
+}
+
 .clear-chat-btn {
   display: flex;
   align-items: center;
@@ -857,5 +889,93 @@ main { padding: 14px 22px 30px; }.page-grid { display: grid; gap: 14px; }.hero-c
   color: #fff;
   font: 700 9px 'Space Grotesk';
 }
+
+/* API Key Modal Neo-brutalist Styles */
+.api-key-modal {
+  max-width: 440px;
+}
+
+.key-free-tip {
+  display: flex;
+  gap: 10px;
+  padding: 10px 12px;
+  margin: 14px 0 10px;
+  background: #fdf3d1;
+  border: 1.5px solid #18171e;
+  border-radius: 12px;
+  font-size: 11px;
+  color: #554400;
+}
+
+.key-free-tip p {
+  margin: 2px 0 6px;
+  font-size: 11px;
+}
+
+.get-key-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-weight: 700;
+  color: #4b3094;
+  text-decoration: underline;
+}
+
+.key-modal-input {
+  width: 100%;
+  padding: 10px 12px;
+  border: 2px solid #18171e;
+  border-radius: 10px;
+  font-size: 13px;
+  font-family: monospace;
+  box-sizing: border-box;
+  margin-top: 4px;
+  background: #fff;
+}
+
+.key-saved-notice {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  padding: 8px 12px;
+  background: #d4f7dc;
+  border: 1.5px solid #18171e;
+  border-radius: 8px;
+  color: #12632b;
+  font: 700 11px 'Space Grotesk';
+}
+
+.key-cleared-notice {
+  margin-top: 10px;
+  padding: 8px 12px;
+  background: #f3edff;
+  border: 1.5px solid #18171e;
+  border-radius: 8px;
+  color: #4b3094;
+  font: 700 11px 'Space Grotesk';
+}
+
+.key-modal-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.clear-key-btn {
+  padding: 10px 14px;
+  border: 2px solid #18171e;
+  border-radius: 10px;
+  background: #ffd3e4;
+  color: #9d2058;
+  font: 700 12px 'Space Grotesk';
+  cursor: pointer;
+  box-shadow: 2px 2px 0 #18171e;
+}
+
+.clear-key-btn:hover {
+  transform: translate(-1px, -1px);
+}
+
 
 

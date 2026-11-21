@@ -14,6 +14,10 @@ import {
   Check,
   Bot,
   Zap,
+  Key,
+  ExternalLink,
+  ShieldCheck,
+  X,
 } from 'lucide-react';
 import type { InventoryItem, WarehouseActivity } from '@/lib/supabase';
 
@@ -47,6 +51,16 @@ export function Chatbot({
 }: ChatbotProps) {
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
+  const [showKeyModal, setShowKeyModal] = useState(false);
+  const [apiKey, setApiKey] = useState<string>(() => {
+    return (
+      localStorage.getItem('smartstock_gemini_key') ||
+      (import.meta.env.VITE_GEMINI_API_KEY as string) ||
+      ''
+    );
+  });
+  const [keyInput, setKeyInput] = useState('');
+  const [saveStatus, setSaveStatus] = useState<'idle' | 'saved' | 'cleared'>('idle');
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const initialGreeting: ChatMessage = {
@@ -121,7 +135,24 @@ export function Chatbot({
     setInput('');
   };
 
-  const executeUserMessage = (userText: string) => {
+  const handleSaveKey = () => {
+    const cleaned = keyInput.trim();
+    if (cleaned) {
+      localStorage.setItem('smartstock_gemini_key', cleaned);
+      setApiKey(cleaned);
+      setSaveStatus('saved');
+    } else {
+      localStorage.removeItem('smartstock_gemini_key');
+      setApiKey((import.meta.env.VITE_GEMINI_API_KEY as string) || '');
+      setSaveStatus('cleared');
+    }
+    setTimeout(() => {
+      setSaveStatus('idle');
+      setShowKeyModal(false);
+    }, 1200);
+  };
+
+  const executeUserMessage = async (userText: string) => {
     const userMsg: ChatMessage = {
       id: String(Date.now()),
       sender: 'user',
@@ -132,12 +163,114 @@ export function Chatbot({
     setMessages((prev) => [...prev, userMsg]);
     setIsTyping(true);
 
-    // Simulate intelligent response computation
+    const activeKey =
+      apiKey.trim() ||
+      localStorage.getItem('smartstock_gemini_key') ||
+      (import.meta.env.VITE_GEMINI_API_KEY as string) ||
+      '';
+
+    if (activeKey) {
+      try {
+        const geminiReply = await callGeminiAPI(userText, items, activity, activeKey);
+        const botResponse: ChatMessage = {
+          id: String(Date.now() + 1),
+          sender: 'pip',
+          text: geminiReply,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          actions: [
+            {
+              label: '🚨 Scan Low Stock',
+              onClick: () => handleSendPrompt('What items are low on stock?'),
+              variant: 'yellow',
+            },
+            {
+              label: '📦 Open Inventory Hub',
+              onClick: () => onNavigateTab?.('inventory'),
+              variant: 'purple',
+            },
+          ],
+        };
+        setMessages((prev) => [...prev, botResponse]);
+        setIsTyping(false);
+        return;
+      } catch (err: unknown) {
+        console.warn('Gemini API call returned error, falling back to local engine:', err);
+        const botResponse = generateAIResponse(userText);
+        const errMsg = err instanceof Error ? err.message : 'API connection notice';
+        botResponse.text = `*(Gemini API notice: ${errMsg}. Using local telemetry intelligence:)*\n\n` + botResponse.text;
+        setMessages((prev) => [...prev, botResponse]);
+        setIsTyping(false);
+        return;
+      }
+    }
+
+    // Default fast local heuristic engine
     setTimeout(() => {
       const botResponse = generateAIResponse(userText);
       setMessages((prev) => [...prev, botResponse]);
       setIsTyping(false);
-    }, 550);
+    }, 450);
+  };
+
+  // Google Gemini 1.5 / 2.0 Flash API Caller
+  const callGeminiAPI = async (
+    prompt: string,
+    currentItems: InventoryItem[],
+    recentActivity: WarehouseActivity[],
+    key: string
+  ): Promise<string> => {
+    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${key}`;
+
+    const inventorySnapshot = currentItems.map((item) => ({
+      sku: item.sku,
+      name: item.name,
+      category: item.category,
+      quantity: item.quantity,
+      reorder_level: item.reorder_level,
+      status: item.status,
+      location: item.location,
+      unit_price: item.unit_price,
+    }));
+
+    const systemPrompt = `You are Pip & Boxie AI, the witty, brilliant neo-brutalist warehouse Copilot for SmartStock.
+You have real-time access to the current warehouse database:
+- LIVE INVENTORY CATALOG: ${JSON.stringify(inventorySnapshot)}
+- RECENT ACTIVITIES: ${JSON.stringify(recentActivity.slice(0, 5))}
+
+Instructions:
+1. Answer accurately and directly using this real-time inventory catalog.
+2. If the user asks about low stock, locations, valuations, stockouts, or fast movers, provide concrete numbers, exact bin locations, and clear warehouse guidance.
+3. Keep your tone energetic, confident, and helpful. Use bold **keywords** and bullet points where helpful.
+4. Keep answers concise (1 to 3 short paragraphs or bullet lists). Never hallucinate SKUs not in the catalog.`;
+
+    const payload = {
+      contents: [
+        {
+          role: 'user',
+          parts: [{ text: `${systemPrompt}\n\nUser Query: ${prompt}` }],
+        },
+      ],
+      generationConfig: {
+        temperature: 0.3,
+        maxOutputTokens: 600,
+      },
+    };
+
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      const errJson = await res.json().catch(() => ({}));
+      throw new Error(errJson?.error?.message || `HTTP ${res.status}`);
+    }
+
+    const data = await res.json();
+    const reply = data.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!reply) throw new Error('No candidate response returned from Gemini');
+    return reply;
   };
 
   // The Smart Inventory AI Brain
@@ -412,15 +545,29 @@ export function Chatbot({
           </div>
           <p>Trained on your real-time warehouse bins, SKUs, and live telemetry.</p>
         </div>
-        <button
-          type="button"
-          className="clear-chat-btn"
-          onClick={handleClearChat}
-          title="Reset conversation"
-        >
-          <RotateCcw size={15} />
-          <span>Reset</span>
-        </button>
+        <div className="chatbot-header-actions">
+          <button
+            type="button"
+            className={`key-status-btn ${apiKey ? 'active' : ''}`}
+            onClick={() => {
+              setKeyInput(apiKey);
+              setShowKeyModal(true);
+            }}
+            title="Configure Gemini API Key"
+          >
+            <Key size={13} />
+            <span>{apiKey ? 'Gemini 1.5' : 'Set Key'}</span>
+          </button>
+          <button
+            type="button"
+            className="clear-chat-btn"
+            onClick={handleClearChat}
+            title="Reset conversation"
+          >
+            <RotateCcw size={14} />
+            <span>Reset</span>
+          </button>
+        </div>
       </section>
 
       {/* Quick Prompt Suggestion Bar */}
@@ -517,6 +664,86 @@ export function Chatbot({
           <Send size={16} />
         </button>
       </form>
+
+      {/* API Key Modal */}
+      {showKeyModal && (
+        <div className="modal-backdrop" onClick={() => setShowKeyModal(false)}>
+          <div className="modal api-key-modal" onClick={(e) => e.stopPropagation()}>
+            <button className="modal-close" onClick={() => setShowKeyModal(false)}>
+              <X size={18} />
+            </button>
+            <div className="modal-icon" style={{ background: '#e5d8ff', color: '#4b3094' }}>
+              <Key size={26} />
+            </div>
+            <p className="eyebrow">INTELLIGENCE ENGINE</p>
+            <h2>Google Gemini API Key</h2>
+            <p>
+              Connect Gemini 1.5 / 2.0 Flash for real-time generative reasoning across your entire inventory.
+            </p>
+
+            <div className="key-free-tip">
+              <Sparkles size={16} />
+              <div>
+                <strong>Need a free API key?</strong>
+                <p>Google AI Studio provides a free key with no credit card required.</p>
+                <a
+                  href="https://aistudio.google.com/app/apikey"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="get-key-link"
+                >
+                  Get Free Gemini Key <ExternalLink size={12} />
+                </a>
+              </div>
+            </div>
+
+            <label style={{ marginTop: '14px', display: 'block', fontWeight: 700, fontSize: '12px' }}>
+              Gemini API Key
+            </label>
+            <input
+              type="password"
+              placeholder="AIzaSy..."
+              value={keyInput}
+              onChange={(e) => setKeyInput(e.target.value)}
+              className="key-modal-input"
+            />
+
+            {saveStatus === 'saved' && (
+              <div className="key-saved-notice">
+                <Check size={14} /> Key saved! Pip will now use Gemini Flash.
+              </div>
+            )}
+            {saveStatus === 'cleared' && (
+              <div className="key-cleared-notice">
+                Key cleared. Pip will use local smart engine.
+              </div>
+            )}
+
+            <div className="key-modal-actions">
+              <button
+                type="button"
+                className="modal-submit"
+                onClick={handleSaveKey}
+                style={{ flex: 1 }}
+              >
+                Save &amp; Connect <ShieldCheck size={16} />
+              </button>
+              {apiKey && (
+                <button
+                  type="button"
+                  className="clear-key-btn"
+                  onClick={() => {
+                    setKeyInput('');
+                    handleSaveKey();
+                  }}
+                >
+                  Remove Key
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
